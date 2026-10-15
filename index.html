@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<title>Klok</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Klok">
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  #instel {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    -webkit-transform: translate(-50%, -50%);
+    transform: translate(-50%, -50%);
+    text-align: center;
+    width: 90%;
+  }
+  #instel h1 {
+    font-size: 40px;
+    font-weight: normal;
+    margin: 0 0 30px 0;
+  }
+  #instel select {
+    font-size: 48px;
+    padding: 10px;
+    margin: 0 8px;
+    background: #222;
+    color: #fff;
+    border: 2px solid #888;
+    border-radius: 8px;
+  }
+  #instel .dubbel { font-size: 48px; }
+  #start {
+    display: block;
+    margin: 40px auto 0 auto;
+    font-size: 40px;
+    padding: 18px 50px;
+    background: #fff;
+    color: #000;
+    border: 0;
+    border-radius: 10px;
+  }
+  #uitleg {
+    margin-top: 30px;
+    font-size: 22px;
+    color: #aaa;
+  }
+  #klokscherm {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+  }
+  #klokhouder {
+    position: absolute;
+    top: 2%;
+    left: 2%;
+    width: 96%;
+    height: 96%;
+  }
+</style>
+</head>
+<body>
+
+<div id="instel">
+  <h1>Stel de tijd in</h1>
+  <select id="uur"></select>
+  <span class="dubbel">:</span>
+  <select id="minuut"></select>
+  <button id="start" type="button">Start klok</button>
+  <div id="uitleg">Druk op Start op het moment dat de seconden op 0 staan.</div>
+</div>
+
+<div id="klokscherm">
+  <div id="klokhouder"></div>
+</div>
+
+<script>
+(function () {
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  var uurSel = document.getElementById('uur');
+  var minSel = document.getElementById('minuut');
+  var startKnop = document.getElementById('start');
+  var instel = document.getElementById('instel');
+  var klokscherm = document.getElementById('klokscherm');
+  var houder = document.getElementById('klokhouder');
+
+  var verschil = 0;
+  var laatste = '';
+  var timer = null;
+
+  // Segmenten: a boven, b rechtsboven, c rechtsonder, d onder,
+  //            e linksonder, f linksboven, g midden
+  var TABEL = {
+    '0': [1,1,1,1,1,1,0],
+    '1': [0,1,1,0,0,0,0],
+    '2': [1,1,0,1,1,0,1],
+    '3': [1,1,1,1,0,0,1],
+    '4': [0,1,1,0,0,1,1],
+    '5': [1,0,1,1,0,1,1],
+    '6': [1,0,1,1,1,1,1],
+    '7': [1,1,1,0,0,0,0],
+    '8': [1,1,1,1,1,1,1],
+    '9': [1,1,1,1,0,1,1]
+  };
+
+  function twee(n) { return (n < 10 ? '0' : '') + n; }
+
+  var H = 5.5;           // halve dikte van een segment
+  var AAN = '#fff';      // kleur van een oplichtend segment
+  var UIT = '#141414';   // kleur van een segment dat niet oplicht (bijna zwart)
+
+  var L = H, R = 60 - H, T = H, M = 55, B = 110 - H;
+
+  function horizontaal(x1, x2, y) {
+    return [x1, y, x1 + H, y - H, x2 - H, y - H, x2, y, x2 - H, y + H, x1 + H, y + H];
+  }
+  // bovenste verticale segment: punt boven; onderaan vlak (doorlopend) of puntig (hoek)
+  function verticaalBoven(x, y1, ym, vlak) {
+    if (vlak) {
+      return [x, y1, x + H, y1 + H, x + H, ym, x - H, ym, x - H, y1 + H];
+    }
+    return [x, y1, x + H, y1 + H, x + H, ym - H, x, ym, x - H, ym - H, x - H, y1 + H];
+  }
+  // onderste verticale segment: bovenaan vlak (doorlopend) of puntig (hoek); punt onderaan
+  function verticaalOnder(x, ym, y2, vlak) {
+    if (vlak) {
+      return [x - H, ym, x + H, ym, x + H, y2 - H, x, y2, x - H, y2 - H];
+    }
+    return [x, ym, x + H, ym + H, x + H, y2 - H, x, y2, x - H, y2 - H, x - H, ym + H];
+  }
+
+  function punten(lijst, dx) {
+    var s = [], k;
+    for (k = 0; k < lijst.length; k += 2) {
+      s.push((lijst[k] + dx) + ',' + lijst[k + 1]);
+    }
+    return s.join(' ');
+  }
+
+  // Vormen van de 7 segmenten (a b c d e f g) voor een bepaald cijfer.
+  // p = patroon van het cijfer; null = alle segmenten (de "8", voor het grijs).
+  // Een verticaal segment loopt vlak door in zijn buur (boven/onder) als die ook
+  // aan staat; anders eindigt het in een punt, zodat het met het middensegment
+  // een hoek vormt: schuin aan de buitenkant, recht aan de binnenkant.
+  function vormen(p) {
+    function aan(i) { return !p || p[i]; }
+    return [
+      horizontaal(L, R, T),              // a
+      verticaalBoven(R, T, M, aan(2)),   // b
+      verticaalOnder(R, M, B, aan(1)),   // c
+      horizontaal(L, R, B),              // d
+      verticaalOnder(L, M, B, aan(5)),   // e
+      verticaalBoven(L, T, M, aan(4)),   // f
+      horizontaal(L, R, M)               // g
+    ];
+  }
+
+  function maakPolygon(lijst, dx, kleur) {
+    var el = document.createElementNS(SVGNS, 'polygon');
+    el.setAttribute('points', punten(lijst, dx));
+    el.setAttribute('fill', kleur);
+    el.setAttribute('stroke', kleur);
+    el.setAttribute('stroke-width', '1');
+    el.setAttribute('stroke-linejoin', 'round');
+    return el;
+  }
+
+  function maakBlokje(x, y) {
+    var r = document.createElementNS(SVGNS, 'rect');
+    r.setAttribute('x', x);
+    r.setAttribute('y', y);
+    r.setAttribute('width', 11);
+    r.setAttribute('height', 11);
+    r.setAttribute('fill', AAN);
+    return r;
+  }
+
+  // Bouwt de hele klok opnieuw op voor de tijd "hhmm". Elke keer een verse tekening,
+  // zodat er geen restjes van het vorige cijfer op het scherm kunnen blijven staan.
+  function bouw(tekst) {
+    var svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('viewBox', '-2 -2 304 114');
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.setAttribute('width', breedte);
+    svg.setAttribute('height', hoogte);
+    svg.style.display = 'block';
+
+    // eigen zwarte achtergrond, zodat er nooit een restje van de vorige tekening doorheen schemert
+    var bg = document.createElementNS(SVGNS, 'rect');
+    bg.setAttribute('x', -2);
+    bg.setAttribute('y', -2);
+    bg.setAttribute('width', 304);
+    bg.setAttribute('height', 114);
+    bg.setAttribute('fill', '#000');
+    svg.appendChild(bg);
+
+    var posities = [0, 70, 170, 240];
+    var achtergrond = vormen(null);
+    var k, j, dx, patroon, v;
+
+    // 1. grijze achtergrond (alle segmenten van alle cijfers)
+    for (k = 0; k < 4; k++) {
+      for (j = 0; j < 7; j++) {
+        svg.appendChild(maakPolygon(achtergrond[j], posities[k], UIT));
+      }
+    }
+    // 2. witte, oplichtende segmenten erbovenop
+    for (k = 0; k < 4; k++) {
+      patroon = TABEL[tekst.charAt(k)];
+      v = vormen(patroon);
+      for (j = 0; j < 7; j++) {
+        if (patroon[j]) {
+          svg.appendChild(maakPolygon(v[j], posities[k], AAN));
+        }
+      }
+    }
+    // 3. dubbele punt precies in het midden (x = 150)
+    svg.appendChild(maakBlokje(144.5, 29.5));
+    svg.appendChild(maakBlokje(144.5, 69.5));
+    return svg;
+  }
+
+  var breedte = 0, hoogte = 0;
+
+  // De klokhouder krijgt een vaste grootte in hele pixels (geen afgeronde procenten)
+  function pasHouderAan() {
+    var bw = window.innerWidth, bh = window.innerHeight;
+    breedte = Math.floor(bw * 0.96);
+    hoogte = Math.floor(bh * 0.96);
+    houder.style.left = Math.floor(bw * 0.02) + 'px';
+    houder.style.top = Math.floor(bh * 0.02) + 'px';
+    houder.style.width = breedte + 'px';
+    houder.style.height = hoogte + 'px';
+  }
+
+  function toon(tekst) {
+    var nieuw = bouw(tekst);
+    houder.appendChild(nieuw);
+    while (houder.childNodes.length > 1) {
+      houder.removeChild(houder.firstChild);
+    }
+  }
+
+  function tik() {
+    var d = new Date(new Date().getTime() + verschil);
+    var tekst = twee(d.getHours()) + twee(d.getMinutes());
+    if (tekst !== laatste) {
+      toon(tekst);
+      laatste = tekst;
+    }
+  }
+
+  function volledigScherm() {
+    var el = document.documentElement;
+    try {
+      if (el.requestFullscreen) { el.requestFullscreen(); }
+      else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); }
+    } catch (e) {}
+  }
+
+  var i, o;
+  for (i = 0; i < 24; i++) {
+    o = document.createElement('option');
+    o.value = i; o.text = twee(i);
+    uurSel.appendChild(o);
+  }
+  for (i = 0; i < 60; i++) {
+    o = document.createElement('option');
+    o.value = i; o.text = twee(i);
+    minSel.appendChild(o);
+  }
+  var nu = new Date();
+  uurSel.value = nu.getHours();
+  minSel.value = nu.getMinutes();
+
+  function herteken() {
+    if (klokscherm.style.display === 'block') {
+      pasHouderAan();
+      if (laatste !== '') { toon(laatste); }
+    }
+  }
+  window.onresize = herteken;
+  window.onorientationchange = function () { setTimeout(herteken, 300); };
+
+  startKnop.onclick = function () {
+    var u = parseInt(uurSel.value, 10);
+    var m = parseInt(minSel.value, 10);
+    var doel = new Date();
+    doel.setHours(u, m, 0, 0);
+    verschil = doel.getTime() - new Date().getTime();
+
+    instel.style.display = 'none';
+    klokscherm.style.display = 'block';
+    pasHouderAan();
+    volledigScherm();
+    laatste = '';
+    tik();
+
+    if (timer) { clearInterval(timer); }
+    timer = setInterval(tik, 500);
+  };
+})();
+</script>
+</body>
+</html>
